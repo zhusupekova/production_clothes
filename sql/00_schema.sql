@@ -1,8 +1,3 @@
-/*
-Лабораторный проект: Производство одежды
-MS SQL Server (T-SQL)
-*/
-
 SET NOCOUNT ON;
 SET XACT_ABORT ON;
 SET ANSI_NULLS ON;

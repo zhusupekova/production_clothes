@@ -1,13 +1,3 @@
-/*
-Run this file in SSMS to deploy the whole project on MS SQL Server
-Generated from component scripts
-*/
-
-/* ===== FILE: 00_schema.sql ===== */
-/*
-Лабораторный проект: Производство одежды
-MS SQL Server (T-SQL)
-*/
 
 SET NOCOUNT ON;
 SET XACT_ABORT ON;

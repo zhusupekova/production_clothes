@@ -1,9 +1,6 @@
 SET NOCOUNT ON;
 GO
 
-/*
-Демонстрационный сценарий по всем лабораторным работам
-*/
 
 DECLARE @today DATE = CAST(GETDATE() AS DATE);
 DECLARE @plus_5_days DATE = DATEADD(DAY, 5, @today);
