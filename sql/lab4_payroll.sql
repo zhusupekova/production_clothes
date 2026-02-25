@@ -1,121 +1,147 @@
-SET search_path TO clothing_factory;
+SET NOCOUNT ON;
+GO
 
--- ЛР4: Выплата зарплаты сотрудникам
+/*
+ЛР4: Выдача зарплаты сотрудникам
+*/
 
-CREATE OR REPLACE FUNCTION calculate_payroll(
-    p_period_month DATE
-)
-RETURNS INT
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    v_period DATE := date_trunc('month', p_period_month)::DATE;
-    v_row RECORD;
-    v_worked_days INT;
-    v_bonus NUMERIC(14,2);
-    v_deductions NUMERIC(14,2);
-    v_gross NUMERIC(14,2);
-    v_tax NUMERIC(14,2);
-    v_net NUMERIC(14,2);
-    v_count INT := 0;
+CREATE OR ALTER PROCEDURE clothing_factory.sp_calculate_payroll
+    @period_month DATE,
+    @processed_count INT OUTPUT
+AS
 BEGIN
-    FOR v_row IN
-        SELECT
-            e.employee_id,
-            p.base_salary,
-            ts.worked_days,
-            ts.bonus,
-            ts.deductions
-        FROM employees e
-        JOIN positions p ON p.position_id = e.position_id
-        LEFT JOIN timesheets ts
-            ON ts.employee_id = e.employee_id
-           AND ts.period_month = v_period
-        WHERE e.is_active = TRUE
-    LOOP
-        v_worked_days := COALESCE(v_row.worked_days, 22);
-        v_bonus := COALESCE(v_row.bonus, 0);
-        v_deductions := COALESCE(v_row.deductions, 0);
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
 
-        v_gross := ROUND(((v_row.base_salary / 22.0) * v_worked_days) + v_bonus - v_deductions, 2);
+    SET @period_month = DATEFROMPARTS(YEAR(@period_month), MONTH(@period_month), 1);
 
-        IF v_gross < 0 THEN
-            v_gross := 0;
-        END IF;
-
-        v_tax := ROUND(v_gross * 0.10, 2);
-        v_net := ROUND(v_gross - v_tax, 2);
-
-        INSERT INTO payroll (
-            employee_id,
-            period_month,
-            gross_salary,
-            tax_amount,
-            net_salary,
-            status
-        )
-        VALUES (
-            v_row.employee_id,
-            v_period,
-            v_gross,
-            v_tax,
-            v_net,
-            'calculated'
-        )
-        ON CONFLICT (employee_id, period_month)
-        DO UPDATE SET
-            gross_salary = EXCLUDED.gross_salary,
-            tax_amount = EXCLUDED.tax_amount,
-            net_salary = EXCLUDED.net_salary,
-            status = 'calculated',
-            paid_date = NULL;
-
-        v_count := v_count + 1;
-    END LOOP;
-
-    RETURN v_count;
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION pay_payroll(
-    p_period_month DATE,
-    p_account_id INT DEFAULT 1,
-    p_paid_date DATE DEFAULT CURRENT_DATE
-)
-RETURNS NUMERIC
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    v_period DATE := date_trunc('month', p_period_month)::DATE;
-    v_total NUMERIC(14,2);
-BEGIN
-    SELECT COALESCE(SUM(net_salary), 0)
-    INTO v_total
-    FROM payroll
-    WHERE period_month = v_period
-      AND status = 'calculated';
-
-    IF v_total <= 0 THEN
-        RAISE EXCEPTION 'Нет рассчитанной зарплаты за период %', v_period;
-    END IF;
-
-    UPDATE payroll
-    SET
-        status = 'paid',
-        paid_date = p_paid_date
-    WHERE period_month = v_period
-      AND status = 'calculated';
-
-    PERFORM fn_record_cash_movement(
-        p_account_id,
-        'out',
-        v_total,
-        'payroll',
-        'payroll',
-        NULL,
-        format('Выплата зарплаты за %s', to_char(v_period, 'YYYY-MM'))
+    DECLARE @src TABLE (
+        employee_id INT PRIMARY KEY,
+        period_month DATE NOT NULL,
+        gross_salary DECIMAL(14,2) NOT NULL,
+        tax_amount DECIMAL(14,2) NOT NULL,
+        net_salary DECIMAL(14,2) NOT NULL
     );
 
-    RETURN v_total;
+    INSERT INTO @src (employee_id, period_month, gross_salary, tax_amount, net_salary)
+    SELECT
+        s.employee_id,
+        @period_month,
+        s.gross_salary,
+        ROUND(s.gross_salary * 0.10, 2) AS tax_amount,
+        ROUND(s.gross_salary - ROUND(s.gross_salary * 0.10, 2), 2) AS net_salary
+    FROM (
+        SELECT
+            e.employee_id,
+            CASE
+                WHEN ROUND(((p.base_salary / 22.0) * ISNULL(ts.worked_days, 22)) + ISNULL(ts.bonus, 0) - ISNULL(ts.deductions, 0), 2) < 0
+                    THEN 0
+                ELSE ROUND(((p.base_salary / 22.0) * ISNULL(ts.worked_days, 22)) + ISNULL(ts.bonus, 0) - ISNULL(ts.deductions, 0), 2)
+            END AS gross_salary
+        FROM clothing_factory.employees e
+        JOIN clothing_factory.positions p ON p.position_id = e.position_id
+        LEFT JOIN clothing_factory.timesheets ts
+            ON ts.employee_id = e.employee_id
+           AND ts.period_month = @period_month
+        WHERE e.is_active = 1
+    ) s;
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        MERGE clothing_factory.payroll AS tgt
+        USING @src AS src
+            ON tgt.employee_id = src.employee_id
+           AND tgt.period_month = src.period_month
+        WHEN MATCHED THEN
+            UPDATE SET
+                gross_salary = src.gross_salary,
+                tax_amount = src.tax_amount,
+                net_salary = src.net_salary,
+                status = N'calculated',
+                paid_date = NULL
+        WHEN NOT MATCHED THEN
+            INSERT (
+                employee_id,
+                period_month,
+                gross_salary,
+                tax_amount,
+                net_salary,
+                status,
+                paid_date
+            )
+            VALUES (
+                src.employee_id,
+                src.period_month,
+                src.gross_salary,
+                src.tax_amount,
+                src.net_salary,
+                N'calculated',
+                NULL
+            );
+
+        SET @processed_count = (SELECT COUNT(*) FROM @src);
+
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        IF XACT_STATE() <> 0
+            ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH
 END;
-$$;
+GO
+
+CREATE OR ALTER PROCEDURE clothing_factory.sp_pay_payroll
+    @period_month DATE,
+    @account_id INT = 1,
+    @paid_date DATE = NULL,
+    @total_paid DECIMAL(14,2) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    SET @period_month = DATEFROMPARTS(YEAR(@period_month), MONTH(@period_month), 1);
+
+    IF @paid_date IS NULL
+        SET @paid_date = CAST(GETDATE() AS DATE);
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        SELECT @total_paid = ROUND(ISNULL(SUM(net_salary), 0), 2)
+        FROM clothing_factory.payroll
+        WHERE period_month = @period_month
+          AND status = N'calculated';
+
+        IF @total_paid <= 0
+            THROW 54001, N'Нет рассчитанной зарплаты за указанный период', 1;
+
+        UPDATE clothing_factory.payroll
+        SET
+            status = N'paid',
+            paid_date = @paid_date
+        WHERE period_month = @period_month
+          AND status = N'calculated';
+
+        DECLARE @movement_id INT;
+        EXEC clothing_factory.sp_record_cash_movement
+            @account_id = @account_id,
+            @direction = N'out',
+            @amount = @total_paid,
+            @category = N'payroll',
+            @reference_table = N'payroll',
+            @reference_id = NULL,
+            @description = N'Выплата зарплаты',
+            @movement_id = @movement_id OUTPUT;
+
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        IF XACT_STATE() <> 0
+            ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH
+END;
+GO

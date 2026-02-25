@@ -1,55 +1,61 @@
-SET search_path TO clothing_factory;
+SET NOCOUNT ON;
+GO
 
-CREATE OR REPLACE FUNCTION fn_record_cash_movement(
-    p_account_id INT,
-    p_direction TEXT,
-    p_amount NUMERIC,
-    p_category TEXT,
-    p_reference_table TEXT DEFAULT NULL,
-    p_reference_id INT DEFAULT NULL,
-    p_description TEXT DEFAULT NULL
-)
-RETURNS INT
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    v_current_balance NUMERIC(14,2);
-    v_new_balance NUMERIC(14,2);
-    v_movement_id INT;
+CREATE OR ALTER PROCEDURE clothing_factory.sp_record_cash_movement
+    @account_id INT,
+    @direction NVARCHAR(3),
+    @amount DECIMAL(14,2),
+    @category NVARCHAR(100),
+    @reference_table NVARCHAR(128) = NULL,
+    @reference_id INT = NULL,
+    @description NVARCHAR(400) = NULL,
+    @movement_id INT OUTPUT
+AS
 BEGIN
-    IF p_amount IS NULL OR p_amount <= 0 THEN
-        RAISE EXCEPTION 'Сумма движения должна быть больше 0';
-    END IF;
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
 
-    IF p_direction NOT IN ('in', 'out') THEN
-        RAISE EXCEPTION 'Направление должно быть in или out';
-    END IF;
+    IF @amount IS NULL OR @amount <= 0
+        THROW 50001, N'Сумма движения должна быть больше 0', 1;
 
-    SELECT balance
-    INTO v_current_balance
-    FROM cash_accounts
-    WHERE account_id = p_account_id
-    FOR UPDATE;
+    IF @direction NOT IN (N'in', N'out')
+        THROW 50002, N'Направление должно быть in или out', 1;
 
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Счет % не найден', p_account_id;
-    END IF;
+    BEGIN TRANSACTION;
 
-    IF p_direction = 'in' THEN
-        v_new_balance := v_current_balance + p_amount;
+    IF @direction = N'in'
+    BEGIN
+        UPDATE clothing_factory.cash_accounts
+        SET balance = ROUND(balance + @amount, 2)
+        WHERE account_id = @account_id;
+
+        IF @@ROWCOUNT = 0
+        BEGIN
+            ROLLBACK TRANSACTION;
+            THROW 50003, N'Счет не найден', 1;
+        END
+    END
     ELSE
-        v_new_balance := v_current_balance - p_amount;
-        IF v_new_balance < 0 THEN
-            RAISE EXCEPTION 'Недостаточно денег на счете %: доступно %, требуется %',
-                p_account_id, v_current_balance, p_amount;
-        END IF;
-    END IF;
+    BEGIN
+        UPDATE clothing_factory.cash_accounts
+        SET balance = ROUND(balance - @amount, 2)
+        WHERE account_id = @account_id
+          AND balance >= @amount;
 
-    UPDATE cash_accounts
-    SET balance = v_new_balance
-    WHERE account_id = p_account_id;
+        IF @@ROWCOUNT = 0
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM clothing_factory.cash_accounts WHERE account_id = @account_id)
+            BEGIN
+                ROLLBACK TRANSACTION;
+                THROW 50004, N'Счет не найден', 1;
+            END
 
-    INSERT INTO cash_movements (
+            ROLLBACK TRANSACTION;
+            THROW 50005, N'Недостаточно средств на счете', 1;
+        END
+    END
+
+    INSERT INTO clothing_factory.cash_movements (
         account_id,
         direction,
         amount,
@@ -59,16 +65,17 @@ BEGIN
         description
     )
     VALUES (
-        p_account_id,
-        p_direction,
-        p_amount,
-        p_category,
-        p_reference_table,
-        p_reference_id,
-        p_description
-    )
-    RETURNING movement_id INTO v_movement_id;
+        @account_id,
+        @direction,
+        @amount,
+        @category,
+        @reference_table,
+        @reference_id,
+        @description
+    );
 
-    RETURN v_movement_id;
+    SET @movement_id = CAST(SCOPE_IDENTITY() AS INT);
+
+    COMMIT TRANSACTION;
 END;
-$$;
+GO

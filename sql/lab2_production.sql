@@ -1,131 +1,147 @@
-SET search_path TO clothing_factory;
+SET NOCOUNT ON;
+GO
 
--- ЛР2: Производство готовой продукции
-CREATE OR REPLACE FUNCTION run_production(
-    p_product_id INT,
-    p_quantity NUMERIC,
-    p_order_date DATE DEFAULT CURRENT_DATE
-)
-RETURNS INT
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    v_production_order_id INT;
-    v_row RECORD;
-    v_required_qty NUMERIC(14,3);
-    v_total_cost NUMERIC(14,2) := 0;
-    v_components_count INT := 0;
+/*
+ЛР2: Функционал производства готовой продукции
+*/
 
-    v_finished_qty NUMERIC(14,3);
-    v_finished_avg_cost NUMERIC(14,2);
-    v_new_finished_qty NUMERIC(14,3);
-    v_new_finished_cost NUMERIC(14,2);
+CREATE OR ALTER PROCEDURE clothing_factory.sp_run_production
+    @product_id INT,
+    @quantity DECIMAL(14,3),
+    @order_date DATE = NULL,
+    @production_order_id INT OUTPUT
+AS
 BEGIN
-    IF p_quantity IS NULL OR p_quantity <= 0 THEN
-        RAISE EXCEPTION 'Количество выпуска должно быть больше 0';
-    END IF;
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
 
-    IF NOT EXISTS (SELECT 1 FROM products WHERE product_id = p_product_id) THEN
-        RAISE EXCEPTION 'Продукт % не найден', p_product_id;
-    END IF;
+    IF @quantity IS NULL OR @quantity <= 0
+        THROW 52001, N'Количество выпуска должно быть больше 0', 1;
 
-    INSERT INTO production_orders (product_id, order_date, planned_qty, status)
-    VALUES (p_product_id, p_order_date, p_quantity, 'in_progress')
-    RETURNING production_order_id INTO v_production_order_id;
+    IF @order_date IS NULL
+        SET @order_date = CAST(GETDATE() AS DATE);
 
-    FOR v_row IN
+    IF NOT EXISTS (SELECT 1 FROM clothing_factory.products WHERE product_id = @product_id)
+        THROW 52002, N'Продукт не найден', 1;
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        INSERT INTO clothing_factory.production_orders (
+            product_id,
+            order_date,
+            planned_qty,
+            produced_qty,
+            status,
+            total_cost
+        )
+        VALUES (
+            @product_id,
+            @order_date,
+            @quantity,
+            0,
+            N'in_progress',
+            0
+        );
+
+        SET @production_order_id = CAST(SCOPE_IDENTITY() AS INT);
+
+        DECLARE @consumption TABLE (
+            raw_material_id INT PRIMARY KEY,
+            required_qty DECIMAL(14,3) NOT NULL,
+            unit_cost DECIMAL(14,2) NOT NULL,
+            stock_qty DECIMAL(14,3) NULL
+        );
+
+        INSERT INTO @consumption (raw_material_id, required_qty, unit_cost, stock_qty)
         SELECT
             b.raw_material_id,
-            b.qty_per_unit,
-            COALESCE(ri.quantity, 0) AS stock_qty,
-            COALESCE(ri.avg_cost, 0) AS avg_cost
-        FROM bill_of_materials b
-        LEFT JOIN raw_inventory ri ON ri.raw_material_id = b.raw_material_id
-        WHERE b.product_id = p_product_id
-    LOOP
-        v_components_count := v_components_count + 1;
-        v_required_qty := ROUND(v_row.qty_per_unit * p_quantity, 3);
+            ROUND(b.qty_per_unit * @quantity, 3) AS required_qty,
+            ISNULL(ri.avg_cost, 0) AS unit_cost,
+            ri.quantity AS stock_qty
+        FROM clothing_factory.bill_of_materials b
+        LEFT JOIN clothing_factory.raw_inventory ri WITH (UPDLOCK, HOLDLOCK)
+            ON ri.raw_material_id = b.raw_material_id
+        WHERE b.product_id = @product_id;
 
-        IF v_row.stock_qty < v_required_qty THEN
-            RAISE EXCEPTION 'Недостаточно сырья %: требуется %, на складе %',
-                v_row.raw_material_id, v_required_qty, v_row.stock_qty;
-        END IF;
+        IF NOT EXISTS (SELECT 1 FROM @consumption)
+            THROW 52003, N'Для продукта не задана спецификация BOM', 1;
 
-        v_total_cost := v_total_cost + (v_required_qty * v_row.avg_cost);
-    END LOOP;
+        IF EXISTS (SELECT 1 FROM @consumption WHERE stock_qty IS NULL)
+            THROW 52004, N'Не для всех материалов создана строка склада сырья', 1;
 
-    IF v_components_count = 0 THEN
-        RAISE EXCEPTION 'Для продукта % не задана спецификация (BOM)', p_product_id;
-    END IF;
+        IF EXISTS (SELECT 1 FROM @consumption WHERE stock_qty < required_qty)
+            THROW 52005, N'Недостаточно сырья для выполнения производства', 1;
 
-    FOR v_row IN
-        SELECT
-            b.raw_material_id,
-            b.qty_per_unit,
-            ri.avg_cost
-        FROM bill_of_materials b
-        JOIN raw_inventory ri ON ri.raw_material_id = b.raw_material_id
-        WHERE b.product_id = p_product_id
-        FOR UPDATE OF ri
-    LOOP
-        v_required_qty := ROUND(v_row.qty_per_unit * p_quantity, 3);
+        UPDATE ri
+        SET
+            ri.quantity = ROUND(ri.quantity - c.required_qty, 3),
+            ri.updated_at = SYSDATETIME()
+        FROM clothing_factory.raw_inventory ri
+        JOIN @consumption c ON c.raw_material_id = ri.raw_material_id;
 
-        UPDATE raw_inventory
-        SET quantity = quantity - v_required_qty,
-            updated_at = NOW()
-        WHERE raw_material_id = v_row.raw_material_id;
-
-        INSERT INTO production_consumption (
+        INSERT INTO clothing_factory.production_consumption (
             production_order_id,
             raw_material_id,
             quantity,
             unit_cost
         )
-        VALUES (
-            v_production_order_id,
-            v_row.raw_material_id,
-            v_required_qty,
-            v_row.avg_cost
+        SELECT
+            @production_order_id,
+            raw_material_id,
+            required_qty,
+            unit_cost
+        FROM @consumption;
+
+        DECLARE @total_cost DECIMAL(14,2);
+        SET @total_cost = (
+            SELECT ROUND(SUM(required_qty * unit_cost), 2)
+            FROM @consumption
         );
-    END LOOP;
 
-    SELECT quantity, avg_cost
-    INTO v_finished_qty, v_finished_avg_cost
-    FROM finished_inventory
-    WHERE product_id = p_product_id
-    FOR UPDATE;
+        MERGE clothing_factory.finished_inventory AS tgt
+        USING (
+            SELECT
+                @product_id AS product_id,
+                @quantity AS produced_qty,
+                @total_cost AS production_cost
+        ) AS src
+            ON tgt.product_id = src.product_id
+        WHEN MATCHED THEN
+            UPDATE SET
+                quantity = ROUND(tgt.quantity + src.produced_qty, 3),
+                avg_cost = CASE
+                    WHEN (tgt.quantity + src.produced_qty) = 0 THEN 0
+                    ELSE ROUND(((tgt.quantity * tgt.avg_cost) + src.production_cost) / (tgt.quantity + src.produced_qty), 2)
+                END,
+                updated_at = SYSDATETIME()
+        WHEN NOT MATCHED THEN
+            INSERT (product_id, quantity, avg_cost, updated_at)
+            VALUES (
+                src.product_id,
+                src.produced_qty,
+                CASE WHEN src.produced_qty = 0 THEN 0 ELSE ROUND(src.production_cost / src.produced_qty, 2) END,
+                SYSDATETIME()
+            );
 
-    IF NOT FOUND THEN
-        v_finished_qty := 0;
-        v_finished_avg_cost := 0;
-    END IF;
+        UPDATE clothing_factory.production_orders
+        SET
+            produced_qty = @quantity,
+            completion_date = CAST(GETDATE() AS DATE),
+            total_cost = @total_cost,
+            status = N'completed'
+        WHERE production_order_id = @production_order_id;
 
-    v_new_finished_qty := v_finished_qty + p_quantity;
-    v_new_finished_cost := CASE
-        WHEN v_new_finished_qty = 0 THEN 0
-        ELSE ROUND(((v_finished_qty * v_finished_avg_cost) + v_total_cost) / v_new_finished_qty, 2)
-    END;
+        UPDATE clothing_factory.products
+        SET standard_cost = CASE WHEN @quantity = 0 THEN standard_cost ELSE ROUND(@total_cost / @quantity, 2) END
+        WHERE product_id = @product_id;
 
-    INSERT INTO finished_inventory (product_id, quantity, avg_cost, updated_at)
-    VALUES (p_product_id, v_new_finished_qty, v_new_finished_cost, NOW())
-    ON CONFLICT (product_id)
-    DO UPDATE SET
-        quantity = EXCLUDED.quantity,
-        avg_cost = EXCLUDED.avg_cost,
-        updated_at = NOW();
-
-    UPDATE production_orders
-    SET
-        produced_qty = p_quantity,
-        completion_date = CURRENT_DATE,
-        total_cost = ROUND(v_total_cost, 2),
-        status = 'completed'
-    WHERE production_order_id = v_production_order_id;
-
-    UPDATE products
-    SET standard_cost = ROUND(v_total_cost / p_quantity, 2)
-    WHERE product_id = p_product_id;
-
-    RETURN v_production_order_id;
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        IF XACT_STATE() <> 0
+            ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH
 END;
-$$;
+GO
