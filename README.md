@@ -1,6 +1,8 @@
-# Производство одежды - SQL лабораторные работы (MS SQL Server)
+# Производство одежды - SQL проект на MS SQL Server
 
-Проект реализует 6 лабораторных работ для темы «Производство одежды»:
+Проект моделирует основные бизнес-процессы швейного производства в базе данных MS SQL Server. Внутри есть схема БД, тестовые данные, хранимые процедуры, представления и демонстрационный сценарий полного цикла.
+
+## Реализованные процессы
 
 1. Закупка сырья
 2. Производство готовой продукции
@@ -9,30 +11,34 @@
 5. Получение кредита для бизнеса
 6. Отчеты по всем процессам предприятия
 
-## Важно
+## Стек
 
-Скрипты сделаны под **MS SQL Server (T-SQL)** и запускаются в **SSMS**.
+- MS SQL Server
+- T-SQL
+- Stored Procedures
+- Views
+- JSON input для табличных операций
 
 ## Файлы
 
-- `/Users/sezimzhusupekova/university/SQL/production_clothes/sql/00_schema.sql` - структура БД
-- `/Users/sezimzhusupekova/university/SQL/production_clothes/sql/01_seed.sql` - начальные данные
-- `/Users/sezimzhusupekova/university/SQL/production_clothes/sql/02_common_functions.sql` - общая процедура движения денег
-- `/Users/sezimzhusupekova/university/SQL/production_clothes/sql/lab1_procurement.sql` - ЛР1
-- `/Users/sezimzhusupekova/university/SQL/production_clothes/sql/lab2_production.sql` - ЛР2
-- `/Users/sezimzhusupekova/university/SQL/production_clothes/sql/lab3_sales.sql` - ЛР3
-- `/Users/sezimzhusupekova/university/SQL/production_clothes/sql/lab4_payroll.sql` - ЛР4
-- `/Users/sezimzhusupekova/university/SQL/production_clothes/sql/lab5_credit.sql` - ЛР5
-- `/Users/sezimzhusupekova/university/SQL/production_clothes/sql/lab6_reports.sql` - ЛР6
-- `/Users/sezimzhusupekova/university/SQL/production_clothes/sql/run_all.sql` - полный деплой всех лабораторных одним запуском
-- `/Users/sezimzhusupekova/university/SQL/production_clothes/sql/demo_scenario.sql` - демонстрация полного цикла
+- `sql/00_schema.sql` - структура БД
+- `sql/01_seed.sql` - начальные данные
+- `sql/02_common_functions.sql` - общая процедура движения денег
+- `sql/lab1_procurement.sql` - закупка сырья
+- `sql/lab2_production.sql` - производство готовой продукции
+- `sql/lab3_sales.sql` - продажи
+- `sql/lab4_payroll.sql` - расчет и выплата зарплаты
+- `sql/lab5_credit.sql` - кредитный модуль
+- `sql/lab6_reports.sql` - отчеты и аналитические представления
+- `sql/run_all.sql` - полный деплой всех SQL-объектов
+- `sql/demo_scenario.sql` - демонстрация полного бизнес-цикла
 
 ## Как запустить в SSMS
 
 1. Создайте базу, например `production_clothes`.
 2. Выберите эту базу в SSMS.
-3. Выполните файл `run_all.sql`.
-4. Выполните файл `demo_scenario.sql`.
+3. Выполните файл `sql/run_all.sql`.
+4. Выполните файл `sql/demo_scenario.sql`.
 
 ## Примеры вызова процедур
 
